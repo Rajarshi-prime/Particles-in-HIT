@@ -23,8 +23,8 @@ For inertial particles, it can also incorporate back-reaction via two-way coupli
 
 ## Details
 
-- [docs/flow_solver.md](docs/flow_solver.md) — governing equations, hyperviscosity, forcing, dealiasing.
-- [docs/particles.md](docs/particles.md) — interpolation/extrapolation between grid and particles, one-way vs. two-way coupling, inertial particle equation of motion.
+- [docs/Flow_solver.md](docs/Flow_solver.md) — governing equations, hyperviscosity, forcing, dealiasing.
+- [docs/Particles.md](docs/Particles.md) — interpolation/extrapolation between grid and particles, one-way vs. two-way coupling, inertial particle equation of motion.
 
 ## Running
 
