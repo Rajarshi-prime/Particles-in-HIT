@@ -262,7 +262,7 @@ class MPI_particles:
     #@profiler
     def send(self,x,args):
         "Input: x, args = [y,z,....] where y,z are the additional arguments to be sent to the next process"
-        x[:,:self.d] %= self.L
+
         outcond = (x[:,0] < self.startdom) + (x[:,0] >= self.enddom) #! The index before which the particles are to be sent
         cond = ~outcond
         sendbuf = x[outcond].copy()
@@ -294,7 +294,7 @@ class MPI_particles:
         recvbuf = recvbuf.reshape((-1,cdim))
 
         x = np.concatenate((x[cond],recvbuf[:,:x.shape[-1]]),axis = 0)
-        # x[:,:self.d] %= self.L
+        x[:,:self.d] %= self.L
         count = x.shape[-1]
         for i in range(len(args)): 
             args[i] = np.concatenate((args[i][cond],recvbuf[:,count:count + args[i].shape[-1]]),axis = 0)
