@@ -29,7 +29,7 @@ def _calc_usend_numba(ufield, xidx, yidx,zidx,ypos, zpos,usend, Nprtcl,N , dy , 
 @njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z):
     
-    for p in prange(Nprtcl):   
+    for p in range(Nprtcl):   
         for i in prange(cosorder):
             indi = i - cosorder//2+1 
             tempyidx = (yidx[p] + indi)%N
@@ -45,7 +45,7 @@ def _calc_uadd_numba_scalar(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx
 @njit(parallel= True,fastmath = {'nnan', 'ninf', 'nsz', 'arcp', 'contract'}) #! Does not approximate cos
 def _calc_uadd_numba_vector(cfield, xidx, yidx,zidx,ypos, zpos,udat, Nprtcl,N,dx, dy,  dz, cosorder, Y, Z,comp):
     
-    for p in prange(Nprtcl):   
+    for p in range(Nprtcl):   
         for i in prange(cosorder):
             indi = i - cosorder//2+1 
             tempyidx = (yidx[p] + indi)%N
@@ -68,7 +68,8 @@ class MPI_particles:
         self.dx = X[1] - X[0]
         self.dy = Y[1] - Y[0]
         self.dz = Z[1] - Z[0]
-        
+        self.M0 = M0
+        self.rhop = rho_p
         self.rank = comm.Get_rank()
         self.num_process =  comm.Get_size()
         self.Np = self.N//self.num_process
@@ -81,10 +82,15 @@ class MPI_particles:
         self.interporder = 2 #! Power of polynomial +1 
         self.nums = np.arange(self.interporder)
         self.cosorder = 4
-        self.factor = (nu*tau_eta/ (2*rho_p))**3/2 *(36*np.pi*rho_p)/M0 #! Factor connecting mass and stokes number.
-        self.growthfactor = 9 *np.pi*nu/(2*rho_p)
-        self.decelerationfactor = (rho_p/(8*nu))**0.5
-
+        # self.factor = (nu*tau_eta/ (2*rho_p))**(1.5) *(36*np.pi*rho_p)/M0 #! Factor connecting mass and stokes number.
+        # self.growthfactor = 9 *np.pi*nu/(2*rho_p)
+        # self.decelerationfactor = (rho_p/(8*nu))**0.5
+        self.factor = ((4*np.pi*rho_p)*(tau_eta)**(1.5)*(nu)**(1.5) *27 )/(3 * rho_p**(1.5)*2**(1.5))#! Factor connecting mass and stokes number.
+        
+        self.n_cs_factor = (M0/self.rhop) #* Factor relating volume fraction (c_s) and to the n whose mean is 1. c_s =  n *n_cs_factor.
+        self.growthfactor = (3*(np.pi**0.5)/(4*rho_p))**(2./3.) #! Factor for decay of n. Multiply with rho_p and n_cs_factor in the Mdot equation.
+        self.decelerationfactor = self.growthfactor*self.rhop*self.n_cs_factor
+        
         self.nneighbors = math.ceil(self.cosorder/(2*self.Np)) 
         neighbors = [(self.rank - (self.nneighbors -i))%self.num_process for i in range(self.nneighbors)] + [(self.rank + (i + 1))%self.num_process for i in range(self.nneighbors)]
         indexes = list(np.cumsum([2*self.nneighbors]*self.num_process))
@@ -98,7 +104,7 @@ class MPI_particles:
 
         # ------------------- initializing particles ------------------- #
     
-        self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the mass normalized by M0
+        self.coord = np.random.uniform(0,self.L,(self.Nprtcl_proc,2*self.d +1 )) #! Contains both position and velocity and the physical mass initialized randomly between zero and two pi
         self.prtclid = np.arange(self.rank*self.Nprtcl_proc,(self.rank
          + 1)*self.Nprtcl_proc).reshape((-1,1)) #! Unique particle ID
         self.coord[:,-1] = st**1.5*self.factor
@@ -205,10 +211,11 @@ class MPI_particles:
 
     
     def update_intrinsic(self):
-        """Sends particles to the proper ranks, and calculates the intrinsic variables"""
+        """Calculates the intrinsic variables"""
         
         self.st = (self.coord[:,-1]/self.factor)**(2/3.)
         self.rhs = 0.0*self.coord
+        self.rb = (self.coord[:,-1]*(0.75/np.pi)/self.rhop)**(1./3.)
         
     #@profiler
     def particle_exchange(self,coord):
@@ -255,6 +262,7 @@ class MPI_particles:
     #@profiler
     def send(self,x,args):
         "Input: x, args = [y,z,....] where y,z are the additional arguments to be sent to the next process"
+        x[:,:self.d] %= self.L
         outcond = (x[:,0] < self.startdom) + (x[:,0] >= self.enddom) #! The index before which the particles are to be sent
         cond = ~outcond
         sendbuf = x[outcond].copy()
@@ -293,7 +301,7 @@ class MPI_particles:
             count += args[i].shape[-1]
             
         # ------------------- cleaning up ------------------- #
-        self.comm.Barrier()
+        # self.comm.Barrier()
         del outcond,cond, sendbuf,recvbuf
         # gc.collect()
         # --------------------------------------------------- #
@@ -381,7 +389,7 @@ class MPI_particles:
         If the particle is at the edge of the domain, it gets data from the neighboring domains. 
         For multiplying with neighboring ones, this uses the M matrix.
         """
-        pos = coord[:,:self.d]%self.L
+        pos = coord[:,:self.d]
         idx = (pos//self.dx).astype(np.int32)
         idx[:,0] %= self.Np
 
@@ -397,7 +405,7 @@ class MPI_particles:
         
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
-            dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
+            dxshift =  (1 + np.cos((pos[:,0] - self.X[(slx + self.rank*self.Np)%self.N])*(np.pi/(2*self.dx))))/4.0
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
@@ -477,7 +485,7 @@ class MPI_particles:
         
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
-            dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
+            dxshift =  (1 + np.cos((pos[:,0] - self.X[(slx + self.rank*self.Np)%self.N])*(np.pi/(2*self.dx))))/4.0
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
@@ -539,7 +547,7 @@ class MPI_particles:
             # --------------------------------------------------- #
         
         # ------------------- cleaning up ------------------- #
-        self.comm.Barrier()
+        # self.comm.Barrier()
         del pos,idx
         # gc.collect()
         # --------------------------------------------------- #
@@ -563,7 +571,7 @@ class MPI_particles:
         
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
-            dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
+            dxshift =  (1 + np.cos((pos[:,0] - self.X[(slx + self.rank*self.Np)%self.N])*(np.pi/(2*self.dx))))/4.0
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
@@ -618,7 +626,7 @@ class MPI_particles:
             
         
         # ------------------- cleaning up ------------------- #
-        self.comm.Barrier()
+        # self.comm.Barrier()
         del pos, idx
         # gc.collect()
         # --------------------------------------------------- #
@@ -643,7 +651,7 @@ class MPI_particles:
         # ccomp = np.prod(self.exterpdim.shape[1:]) #! Determines the component of the exterpdim.
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
-            dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
+            dxshift =  (1 + np.cos((pos[:,0] - self.X[(slx + self.rank*self.Np)%self.N])*(np.pi/(2*self.dx))))/4.0
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
@@ -719,7 +727,7 @@ class MPI_particles:
         
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
-            dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
+            dxshift =  (1 + np.cos((pos[:,0] - self.X[(slx + self.rank*self.Np)%self.N])*(np.pi/(2*self.dx))))/4.0
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
@@ -809,7 +817,7 @@ class MPI_particles:
         ccomp = np.prod(self.exterpdim.shape[1:]) #! Determines the component of the exterpdim.
         for i in range(order):
             slx = (idx[:,0]-order//2+1 + i)
-            dxshift =  (1 + np.cos((pos[:,0] - self.X[slx%self.N])*(np.pi/(2*self.dx))))/4.0
+            dxshift =  (1 + np.cos((pos[:,0] - self.X[(slx + self.rank*self.Np)%self.N])*(np.pi/(2*self.dx))))/4.0
             outcond = (slx < 0) + (slx >= self.Np)
             cond = ~outcond
             #? Send the xidx,yidx,zidx list 
